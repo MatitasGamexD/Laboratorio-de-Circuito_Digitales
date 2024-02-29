@@ -1,0 +1,230 @@
+#include <LiquidCrystal.h>
+#include <Keypad.h>
+#include <DHT.h>
+#include <DHT_U.h>
+#include "AsyncTaskLib.h"
+#include <Wire.h>
+
+#define DHTPIN 7
+#define DHTTYPE DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Constantes y variables para el sensor de luz
+const int pinSensorLuz = A0;
+const int umbralLuz = 500;
+
+const int rs = 12, en = 11, d4 = 5, d5 = 4, d6 = 3, d7 = 2;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+const byte KEYPAD_ROWS = 4;
+const byte KEYPAD_COLS = 4;
+byte rowPins[KEYPAD_ROWS] = {24, 26, 28, 30};
+byte colPins[KEYPAD_COLS] = {32, 34, 36, 38};
+char keys[KEYPAD_ROWS][KEYPAD_COLS] = {
+  {'1', '2', '3', '+'},
+  {'4', '5', '6', '-'},
+  {'7', '8', '9', '*'},
+  {'.', '0', '=', '/'}
+};
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, KEYPAD_ROWS, KEYPAD_COLS);
+
+const char* claveCorrecta = "1234";
+const int intentosMaximos = 3;
+
+char password[9];
+unsigned int intentosFallidos = 0;
+bool accesoPermitido = true;
+
+float temperatura;
+float humedad;  // Agregado: variable para almacenar la humedad
+bool primeraTareaCompletada = false;
+
+const int pinSDA = 20;
+
+bool ejecutarTareas = true;
+bool passwordEntered = false;
+
+class SystemController {
+public:
+  static void ejecutarTareaTemperatura() {
+    lcd.clear();
+    lcd.print("Ejecutando tarea de temperatura...");
+    delay(2000);
+    primeraTareaCompletada = true;
+  }
+
+  static void ejecutarTareaLuz() {
+    // Leer el valor del sensor de luz
+    int valorLuz = analogRead(pinSensorLuz);
+
+    // Realizar acciones basadas en el valor de luz
+    if (valorLuz < 100) {
+      lcd.clear();
+      lcd.print("Nivel de luz: Bajo");
+    } else if (valorLuz < 500) {
+      lcd.clear();
+      lcd.print("Nivel de luz: Moderado");
+    } else {
+      lcd.clear();
+      lcd.print("luz: Alto");
+    }
+
+    // Mostrar la temperatura y humedad en el LCD
+    lcd.setCursor(0, 1);
+    lcd.print("T:");
+    lcd.print(temperatura);
+    lcd.print("C H:");
+    lcd.print(humedad);
+    lcd.print("%");
+
+   
+  }
+};
+
+AsyncTask tareaTemperatura(5000, true, []() {
+  if (ejecutarTareas && !primeraTareaCompletada) {
+    SystemController::ejecutarTareaTemperatura();
+  }
+});
+
+AsyncTask tareaLuz(5000, true, []() {
+  if (ejecutarTareas && primeraTareaCompletada) {
+    SystemController::ejecutarTareaLuz();
+    ejecutarTareas = false; // Detener la ejecución de tareas
+  }
+});
+
+unsigned long tiempoInicio;
+unsigned long intervalo = 5000;
+
+const int pinLedVerde = 13;
+const int pinLedAzul = 6;
+const int pinLedRojo = 8;
+
+void setup() {
+  pinMode(pinLedVerde, OUTPUT);
+  pinMode(pinLedAzul, OUTPUT);
+  pinMode(pinLedRojo, OUTPUT);
+
+  Wire.begin();
+
+  lcd.begin(16, 2);
+  lcd.print("Contraseña:");
+
+  Serial.begin(9600);
+
+  tiempoInicio = millis();
+  tareaTemperatura.Start();
+  tareaLuz.Start();
+  dht.begin();  // Inicializa el sensor DHT11
+}
+
+void loop() {
+  char key = keypad.getKey();
+
+  if (!passwordEntered && accesoPermitido) {
+    handlePasswordInput(key);
+  } else if (passwordEntered) {
+    float nuevaTemperatura = dht.readTemperature();  // Lee la temperatura en tiempo real
+    humedad = dht.readHumidity();  // Lee la humedad en tiempo real
+
+    if (!isnan(nuevaTemperatura) && !isnan(humedad)) {  // Comprobar si las lecturas son válidas
+      temperatura = nuevaTemperatura;
+      Serial.print("Temperatura:");
+      Serial.println(temperatura);
+      Serial.print("Humedad:");
+      Serial.println(humedad);
+      lcd.clear();
+      lcd.print("Temp: ");
+      lcd.print(temperatura);
+      lcd.print(" C  Hum: ");
+      lcd.print(humedad);
+      lcd.print(" %");
+
+      if (temperatura >= 40) {
+        bloquearSistema();
+      } else if (temperatura >= 30) {
+        activarAlarma();
+      } else if (!primeraTareaCompletada) {
+        // No hacer nada, esperar a que la primera tarea termine
+      }
+    } else {
+      Serial.println("Error al leer la temperatura o humedad.");
+    }
+
+    tareaTemperatura.Update();
+    tareaLuz.Update();
+  }
+
+  if (!ejecutarTareas) {
+    exit(0);
+  }
+}
+
+void handlePasswordInput(char key) {
+  if (key != NO_KEY) {
+    if (key == '=') {
+      password[8] = '\0';
+      lcd.clear();
+      lcd.print("Contraseña ingresada:");
+      lcd.setCursor(0, 1);
+      lcd.print(password);
+      delay(2000);
+
+      if (strcmp(password, claveCorrecta) == 0) {
+        lcd.clear();
+        lcd.print("Contraseña correcta!");
+        digitalWrite(pinLedVerde, HIGH);
+        delay(2000);
+        digitalWrite(pinLedVerde, LOW);
+        intentosFallidos = 0;
+        passwordEntered = true;
+      } else {
+        intentosFallidos++;
+        if (intentosFallidos >= intentosMaximos) {
+          lcd.clear();
+          lcd.print("Sistema Bloqueado");
+          digitalWrite(pinLedRojo, HIGH);
+          delay(2000);
+          digitalWrite(pinLedRojo, LOW);
+          accesoPermitido = false;
+        } else {
+          lcd.clear();
+          lcd.print("Contraseña incorrecta");
+          delay(2000);
+          lcd.clear();
+          lcd.print("Contraseña:");
+          digitalWrite(pinLedAzul, HIGH);
+          delay(2000);
+          digitalWrite(pinLedAzul, LOW);
+        }
+      }
+      memset(password, 0, sizeof(password));
+      lcd.clear();
+      lcd.print("Contraseña:");
+    } else {
+      if (strlen(password) < 8) {
+        password[strlen(password)] = key;
+        lcd.print("*");
+      }
+    }
+  }
+}
+
+void activarAlarma() {
+  lcd.clear();
+  lcd.print("¡ALARMA ACTIVADA!");
+  digitalWrite(pinLedAzul, HIGH); // Enciende el LED azul
+  ejecutarTareas = false;
+}
+
+void bloquearSistema() {
+  lcd.clear();
+  lcd.print("Sistema Bloqueado");
+  digitalWrite(pinLedRojo, HIGH); // Enciende el LED rojo
+  delay(2000);
+  digitalWrite(pinLedRojo, LOW);
+  accesoPermitido = false;
+}
